@@ -144,8 +144,10 @@ extension JSON: SequenceType{
     public var count: Int {
         get {
             switch self.type {
-            case .Array, .Dictionary:
-                return self.object.count
+            case .Array:
+                return self.arrayValue.count
+            case .Dictionary:
+                return self.dictionaryValue.count
             default:
                 return 0
             }
@@ -185,19 +187,25 @@ extension JSON: SequenceType{
     }
 }
 
+public protocol SubscriptType {}
+extension Int: SubscriptType {}
+extension String: SubscriptType {}
+
+typealias Filter = JSON -> JSON
+
 // MARK: - Subscript
 extension JSON {
     
     /**
        If self is .Sequence return the array[index]'s json else return .Null with error
      */
-    public subscript(idx: Int) -> JSON {
+    private subscript(#index: Int) -> JSON {
         get {
             var returnJSON = JSON.nullJSON
             if self.type == .Array {
                 let array_ = self.object as Array<AnyObject>
-                if array_.count > idx {
-                    returnJSON = JSON(array_[idx])
+                if array_.count > index {
+                    returnJSON = JSON(array_[index])
                 } else {
                     returnJSON._error = NSError(domain: ErrorDomain, code:ErrorIndexOutOfBounds , userInfo: [NSLocalizedDescriptionKey: "Array[\(index)] is out of bounds"])
                 }
@@ -209,8 +217,8 @@ extension JSON {
         set {
             if self.type == .Array {
                 var array_ = self.object as Array<AnyObject>
-                if array_.count > idx {
-                    array_[idx] = newValue.object
+                if array_.count > index {
+                    array_[index] = newValue.object
                     self.object = array_
                 }
             }
@@ -220,7 +228,7 @@ extension JSON {
     /**
        If self is .Sequence return the dictionary[key]'s JSON else return .Null with error
      */
-    public subscript(key: String) -> JSON {
+    private subscript(#key: String) -> JSON {
         get {
             var returnJSON = JSON.nullJSON
             if self.type == .Dictionary {
@@ -240,6 +248,67 @@ extension JSON {
                 dictionary_[key] = newValue.object
                 self.object = dictionary_
             }
+        }
+    }
+    
+    private subscript(#sub: SubscriptType) -> JSON {
+        get {
+            switch sub {
+            case let key as String: return self[key:key]
+            case let index as Int: return self[index:index]
+            default:return JSON.nullJSON
+            }
+        }
+        set {
+            switch sub {
+            case let key as String: self[key:key] = newValue
+            case let index as Int: self[index:index] = newValue
+            default:0
+            }
+        }
+    }
+    
+    public subscript(path: [SubscriptType]) -> JSON {
+        get {
+            if path.count == 0 {
+                return JSON.nullJSON
+            }
+            
+            var next = self
+            for sub in path {
+                next = next[sub:sub]
+            }
+            return next
+        }
+        set {
+            
+            switch path.count {
+            case 0: return
+            case 1: self[sub:path[0]] = newValue
+            default:
+                var last = newValue
+                var newPath = path
+                newPath.removeLast()
+                for sub in path.reverse() {
+                    var lastLast = self[newPath]
+                    lastLast[sub:sub] = last
+                    last = lastLast
+                    if newPath.count <= 1 {
+                        break
+                    }
+                    newPath.removeLast()
+                }
+                self[sub:newPath[0]] = last
+            }
+        }
+    }
+    
+    public subscript(path: SubscriptType...) -> JSON {
+        get {
+            return self[path]
+        }
+        set {
+            self[path] = newValue
         }
     }
 }
@@ -370,19 +439,15 @@ extension JSON: Printable, DebugPrintable {
 
 // MARK: - Array
 extension JSON {
-    
+
     //Optional Array<JSON>
     public var array: Array<JSON>? {
         get {
             if self.type == .Array {
-                let array_ = self.object as Array<AnyObject>
-                var returnArray_ = Array<JSON>()
-                for subObject_ in array_ {
-                    returnArray_.append(JSON(subObject_))
-                }
-                return returnArray_
+                return map(self.object as Array<AnyObject>){ JSON($0) }
+            } else {
+                return nil
             }
-            return nil
         }
     }
     
@@ -416,17 +481,20 @@ extension JSON {
 // MARK: - Dictionary
 extension JSON {
     
+    private func _map<Key:Hashable ,Value, NewValue>(source: [Key: Value], transform: Value -> NewValue) -> [Key: NewValue] {
+        var result = [Key: NewValue](minimumCapacity:source.count)
+        for (key,value) in source {
+            result[key] = transform(value)
+        }
+        return result
+    }
+
     //Optional Dictionary<String, JSON>
     public var dictionary: Dictionary<String, JSON>? {
         get {
-            switch self.type {
-            case .Dictionary:
-                var jsonDictionary_ = Dictionary<String, JSON>()
-                for (key_, value_) in self.object as Dictionary<String, AnyObject> {
-                    jsonDictionary_[key_] = JSON( value_)
-                }
-                return jsonDictionary_
-            default:
+            if self.type == .Dictionary {
+                return _map(self.object as Dictionary<String, AnyObject>){ JSON($0) }
+            } else {
                 return nil
             }
         }
@@ -487,8 +555,10 @@ extension JSON: BooleanType {
             switch self.type {
             case .Bool, .Number, .String:
                 return self.object.boolValue
-            case .Array, .Dictionary:
-                return self.object.count > 0
+            case .Array:
+                return self.arrayValue.count > 0
+            case .Dictionary:
+                return self.dictionaryValue.count > 0
             case .Null:
                 return false
             default:
@@ -985,18 +1055,19 @@ public func <(lhs: JSON, rhs: JSON) -> Bool {
     }
 }
 
+private let trueNumber = NSNumber(bool: true)
+private let falseNumber = NSNumber(bool: false)
+private let trueObjCType = String.fromCString(trueNumber.objCType)
+private let falseObjCType = String.fromCString(falseNumber.objCType)
+
 // MARK: - NSNumber: Comparable
 extension NSNumber: Comparable {
     var isBool:Bool {
         get {
-            switch String.fromCString(self.objCType)! {
-            case "c", "C":
-                if self.compare(NSNumber(bool: true)) == NSComparisonResult.OrderedSame || self.compare(NSNumber(bool: false)) == NSComparisonResult.OrderedSame {
-                    return true
-                } else {
-                    return false
-                }
-            default:
+            let objCType = String.fromCString(self.objCType)
+            if (self.compare(trueNumber) == NSComparisonResult.OrderedSame &&  objCType == trueObjCType) ||  (self.compare(falseNumber) == NSComparisonResult.OrderedSame && objCType == falseObjCType){
+                return true
+            } else {
                 return false
             }
         }
